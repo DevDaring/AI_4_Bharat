@@ -125,3 +125,10 @@ AI_4_Bharat/
 ## License
 
 Built for the **AWS "AI for Bharat" Hackathon**. All code is original work by Team DevDaring.
+
+
+Command:
+cd ~/Documents/AI_4_Bharat/Code && env -u LD_LIBRARY_PATH -u LD_PRELOAD python3 -u main.py --guided 2>&1 | tee logs/asha_$(date +%Y%m%d_%H%M%S).log
+
+#For Speaker Connection:
+bluetoothctl connect 78:2B:64:DD:68:CF

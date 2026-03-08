@@ -93,14 +93,13 @@ def _discover_mic() -> str:
 
 
 def record_audio(output_path: str, duration: int = 7, device: str = None, beep: bool = True) -> bool:
-    """Record WAV from Jabra mic. Returns True on success."""
+    """Record WAV from mic. Uses PulseAudio (parecord) primary, arecord fallback."""
     from config import JABRA_CAPTURE_DEV, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS
     device = device or JABRA_CAPTURE_DEV
     if device.startswith("hw:"):
         device = "plug" + device
     if beep:
         _play_beep()
-    _release_audio_device()
     # Delete stale audio file to prevent reuse if recording fails
     try:
         if os.path.exists(output_path):
@@ -109,37 +108,48 @@ def record_audio(output_path: str, duration: int = 7, device: str = None, beep: 
         pass
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    for attempt in range(2):
-        cmd = ["arecord", "-D", device, "-f", "S16_LE",
-               "-r", str(AUDIO_SAMPLE_RATE), "-c", str(AUDIO_CHANNELS),
-               "-d", str(duration), output_path]
-        _logger().info("[VOICE] Recording %ds (attempt %d)…", duration, attempt + 1)
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 5)
-            if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                _logger().info("[VOICE] Recorded %s (%d bytes)", output_path, os.path.getsize(output_path))
-                return True
-            if "busy" in res.stderr.lower():
-                _release_audio_device()
-                time.sleep(0.5)
-                continue
-        except subprocess.TimeoutExpired:
-            pass
-        break
+    # Primary: PulseAudio (works when PulseAudio owns the ALSA device)
+    _logger().info("[VOICE] Recording %ds…", duration)
+    if _record_pulseaudio(output_path, duration):
+        return True
 
-    # Fallback: parecord
-    return _record_pulseaudio(output_path, duration)
+    # Fallback: direct ALSA (works when PulseAudio is not running)
+    _logger().info("[VOICE] parecord failed, trying arecord…")
+    _release_audio_device()
+    cmd = ["arecord", "-D", device, "-f", "S16_LE",
+           "-r", str(AUDIO_SAMPLE_RATE), "-c", str(AUDIO_CHANNELS),
+           "-d", str(duration), output_path]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 5)
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            _logger().info("[VOICE] Recorded %s (%d bytes)", output_path, os.path.getsize(output_path))
+            return True
+    except subprocess.TimeoutExpired:
+        pass
+    return False
 
 
 def _record_pulseaudio(output_path: str, duration: int) -> bool:
+    """Record via PulseAudio. Uses timeout to stop parecord after duration."""
     from config import AUDIO_SAMPLE_RATE, AUDIO_CHANNELS
+    cmd = ["parecord", f"--channels={AUDIO_CHANNELS}", f"--rate={AUDIO_SAMPLE_RATE}",
+           "--format=s16le", "--file-format=wav", output_path]
     try:
-        cmd = ["parecord", "--channels", str(AUDIO_CHANNELS), "--rate", str(AUDIO_SAMPLE_RATE),
-               "--format", "s16le", "--file-format", "wav", output_path]
-        subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 1)
-    except subprocess.TimeoutExpired:
-        pass
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            proc.wait(timeout=duration + 0.5)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+    except Exception as e:
+        _logger().warning("[VOICE] parecord error: %s", e)
+        return False
     if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+        _logger().info("[VOICE] Recorded %s (%d bytes)", output_path, os.path.getsize(output_path))
         return True
     return False
 
